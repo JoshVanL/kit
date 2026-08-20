@@ -16,6 +16,7 @@ package logger
 import (
 	"context"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 )
@@ -76,6 +77,11 @@ var (
 var (
 	globalStates     = map[string]*state{}
 	globalStatesLock = sync.Mutex{}
+
+	// globalHandlers are the secondary sinks applied to every state already
+	// created and to every state created afterwards. Guarded by
+	// globalStatesLock.
+	globalHandlers []slog.Handler
 )
 
 // sharedState returns the configuration for name, creating it if necessary.
@@ -86,10 +92,35 @@ func sharedState(name string) *state {
 	s, ok := globalStates[name]
 	if !ok {
 		s = newState()
+		for _, h := range globalHandlers {
+			s.addHandler(h)
+		}
 		globalStates[name] = s
 	}
 
 	return s
+}
+
+// AddHandlerToAllLoggers registers h as a secondary sink for every logger
+// already created and for all loggers created afterwards, including the
+// deprecated printf-style loggers returned by [NewLogger]. Records are
+// delivered after the logger's level filter has been applied, with the Dapr
+// schema fields (scope, type, instance, ver, app_id) attached as attributes.
+//
+// h must be non-blocking: it runs on the logging call path. Any error it
+// returns is discarded and never affects primary log output.
+//
+// Loggers obtained through [FromLogger] over a third-party [Logger]
+// implementation do not participate: their output is owned by that
+// implementation, not by this package.
+func AddHandlerToAllLoggers(h slog.Handler) {
+	globalStatesLock.Lock()
+	defer globalStatesLock.Unlock()
+
+	globalHandlers = append(globalHandlers, h)
+	for _, s := range globalStates {
+		s.addHandler(h)
+	}
 }
 
 // getStates returns a snapshot of every registered logger's configuration.

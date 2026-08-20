@@ -107,7 +107,7 @@ func (h *handler) WithGroup(name string) slog.Handler {
 	return &n
 }
 
-func (h *handler) Handle(_ context.Context, r slog.Record) error {
+func (h *handler) Handle(ctx context.Context, r slog.Record) error {
 	bufp, _ := bufPool.Get().(*[]byte)
 	buf := (*bufp)[:0]
 
@@ -160,7 +160,27 @@ func (h *handler) Handle(_ context.Context, r slog.Record) error {
 		buf = appendText(buf, ts, r.Level, r.Message, fields)
 	}
 
-	return h.state.write(buf)
+	err := h.state.write(buf)
+
+	// Fan out to the secondary sinks registered through
+	// AddHandlerToAllLoggers. A fresh record carries the Dapr schema fields as
+	// plain attributes, so sinks do not depend on this handler's internal
+	// attrs/groups layout; the zero PC keeps sinks from resolving a call site
+	// inside this package.
+	// NOTE: Sink errors are discarded because primary log output must
+	// never fail or slow down because of a sink.
+	if hs := h.state.handlers.Load(); hs != nil {
+		rec := slog.NewRecord(ts, r.Level, r.Message, 0)
+		rec.AddAttrs(fields...)
+
+		for _, sh := range *hs {
+			if sh.Enabled(ctx, r.Level) {
+				_ = sh.Handle(ctx, rec)
+			}
+		}
+	}
+
+	return err
 }
 
 // appendFlattened resolves a and appends it to dst, expanding groups into
