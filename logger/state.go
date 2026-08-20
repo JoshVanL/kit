@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -52,6 +53,31 @@ type state struct {
 	// records are fully serialised, as they were under logrus.
 	outMu sync.Mutex
 	out   io.Writer
+
+	// handlers holds the secondary sinks registered through
+	// AddHandlerToAllLoggers. Copy-on-write: the slice is never mutated in
+	// place, only swapped, so the hot path is a single atomic load.
+	handlers atomic.Pointer[[]slog.Handler]
+}
+
+// addHandler appends h to the secondary sinks (copy-on-write).
+func (s *state) addHandler(h slog.Handler) {
+	for {
+		old := s.handlers.Load()
+
+		var prev []slog.Handler
+		if old != nil {
+			prev = *old
+		}
+
+		// slices.Clip forces append to reallocate, so the slice a concurrent
+		// reader may be iterating is never mutated.
+		next := append(slices.Clip(prev), h)
+
+		if s.handlers.CompareAndSwap(old, &next) {
+			return
+		}
+	}
 }
 
 // defaults holds the configuration applied to loggers created from now on.
